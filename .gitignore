@@ -220,3 +220,7 @@ public/pt/help.html
 public/pt/changelog.html
 public/pt/help/embed-api.html
 public/pt/index.html
+
+# local test decks (not for upstream)
+public/my-dream.pptx
+public/ppt-demo.pptx
