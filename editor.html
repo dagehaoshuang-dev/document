@@ -570,6 +570,86 @@
               });
               break;
             }
+            /* inspectElements：结构化返回指定页全部元素（替代 eval 遍历 spTree 的查询场景） */
+            case 'inspectElements': {
+              var pageIdx = Number(m.page) || 0;
+              var elements = [];
+              try {
+                var ld = editor.WordControl.m_oLogicDocument;
+                var slide = ld.Slides[pageIdx];
+                var spx = slide.cSld.spTree;
+                for (var j = 0; j < spx.length; j++) {
+                  var sh = spx[j];
+                  var rec = { shapeIdx: j };
+                  try { var b = sh.getBounds ? sh.getBounds() : null; if (b) rec.geometry = { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) }; } catch (e) {}
+                  try { var dc = sh.getDocContent ? sh.getDocContent() : null; if (dc && typeof dc.GetText === 'function') { var t = String(dc.GetText()); if (t && t.trim()) rec.text = t.slice(0, 200); } } catch (e) {}
+                  try { var inner = sh.asc_getObjectValue ? sh.asc_getObjectValue() : null; if (inner) rec.kind = describeOne(sh).kind; } catch (e) {}
+                  elements.push(rec);
+                }
+              } catch (e) { fail(e); break; }
+              done({ ok: true, page: pageIdx, count: elements.length, elements: elements });
+              break;
+            }
+            /* setRunStyle：形状级样式（字号/粗体/斜体——替代 eval 写 run.Pr 的场景） */
+            case 'setRunStyle': {
+              var pageIdx = Number(m.page) || 0;
+              var shapeIdx = Number(m.shapeIdx) || 0;
+              try {
+                var ld = editor.WordControl.m_oLogicDocument;
+                var sh = ld.Slides[pageIdx].cSld.spTree[shapeIdx];
+                var dc = sh && sh.getDocContent ? sh.getDocContent() : null;
+                if (!dc || !dc.Content || !dc.Content[0]) { fail(new Error('shape has no text content')); break; }
+                var para = dc.Content[0];
+                var runs = para.GetAllRuns ? para.GetAllRuns() : (para.GetFirstRun ? [para.GetFirstRun()] : []);
+                var changed = 0;
+                for (var ri = 0; ri < runs.length; ri++) {
+                  var run = runs[ri];
+                  if (!run || !run.Pr) continue;
+                  if (m.fontSize != null && run.Pr.SetFontSize) { run.Pr.SetFontSize(Number(m.fontSize)); changed++; }
+                  if (m.bold != null && run.Pr.SetBold) { run.Pr.SetBold(!!m.bold); changed++; }
+                  if (m.italic != null && run.Pr.SetItalic) { run.Pr.SetItalic(!!m.italic); changed++; }
+                  if (m.font && run.Pr.SetFontFamily) { run.Pr.SetFontFamily(String(m.font)); changed++; }
+                }
+                done({ ok: true, shapeIdx: shapeIdx, runsChanged: changed });
+              } catch (e) { fail(e); }
+              break;
+            }
+            /* moveElement：把指定元素移到绝对坐标 (x,y)。
+               正确链路（源码 + 实测打通，文本/图片通用，2026-08）：
+                 graphicObjects.selectObject(sh) + moveSelectedObjects(dx,dy)
+               moveSelectedObjects 是引擎统一移动入口（对齐/分布功能都用它），走
+               checkSelectedObjectsForMove → track → MoveState.onMouseUp 完整事务，
+               会写 History + 触发画布立即重绘。之前直接改 xfrm / setOffX / shiftXfrm
+               都因没走移动事务而"数据变但画布不重绘"。 */
+            case 'moveElement': {
+              var pageIdx = Number(m.page) || 0;
+              var shapeIdx = Number(m.shapeIdx) || 0;
+              var targetX = Number(m.x);
+              var targetY = Number(m.y);
+              if (!isFinite(targetX) || !isFinite(targetY)) { fail(new Error('x/y 必须为数字')); break; }
+              try {
+                var ld = editor.WordControl.m_oLogicDocument;
+                var slide = ld.Slides[pageIdx];
+                var sh = slide && slide.cSld ? slide.cSld.spTree[shapeIdx] : null;
+                if (!sh) { fail(new Error('shape not found')); break; }
+                var before = null;
+                try { var b0 = sh.getBounds(); before = { x: Math.round(b0.x), y: Math.round(b0.y) }; } catch (e) {}
+                var g = slide.graphicObjects;
+                if (!(g && typeof g.moveSelectedObjects === 'function')) { fail(new Error('graphicObjects.moveSelectedObjects unavailable')); break; }
+                var dx = targetX - (before ? before.x : 0);
+                var dy = targetY - (before ? before.y : 0);
+                if (dx !== 0 || dy !== 0) {
+                  if (typeof g.selectObject === 'function' && !g.getSelectedArray().some(function (s) { return s === sh; })) {
+                    try { g.selectObject(sh); } catch (e) {}
+                  }
+                  g.moveSelectedObjects(dx, dy);
+                }
+                var after = null;
+                try { var b1 = sh.getBounds(); after = { x: Math.round(b1.x), y: Math.round(b1.y) }; } catch (e) {}
+                done({ ok: true, shapeIdx: shapeIdx, target: { x: targetX, y: targetY }, before: before, after: after, moved: !!(before && after && (before.x !== after.x || before.y !== after.y)) });
+              } catch (e) { fail(e); }
+              break;
+            }
             default:
               fail(new Error('unknown aiEdit op: ' + op));
           }
