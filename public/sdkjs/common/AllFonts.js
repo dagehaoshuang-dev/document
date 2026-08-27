@@ -1,4 +1,4 @@
-﻿window["__all_fonts_js_version__"] = 2;
+window["__all_fonts_js_version__"] = 2;
 
 window["__fonts_files"] = [
 "000",
@@ -299,7 +299,7 @@ window["__fonts_infos"] = [
 ["Asana Math",107,1,-1,-1,-1,-1,-1,-1],
 ["ASCW3",103,0,-1,-1,-1,-1,-1,-1],
 ["Caladea",111,0,110,0,108,0,109,0],
-["Calibri",115,0,-1,-1,-1,-1,-1,-1],
+["Calibri",115,0,114,0,112,0,113,0],
 ["Carlito",115,0,114,0,112,0,113,0],
 ["Comic Sans MS",51,0,-1,-1,50,0,-1,-1],
 ["Courier New",61,0,60,0,58,0,59,0],

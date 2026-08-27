@@ -184,6 +184,7 @@ const LATIN_REPLACEMENTS = {
   'Arial Black': 'Liberation Sans:bold',
   'Andale Mono': 'Liberation Mono',
   Calibri: 'Carlito',
+  'Calibri Light': 'Carlito',
   'Courier New': 'Liberation Mono',
   'Times New Roman': 'Liberation Serif',
   'Comic Sans MS': 'DejaVu Sans',

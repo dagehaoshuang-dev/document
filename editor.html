@@ -49,4 +49,532 @@
     </noscript>
   </body>
   <script type="module" src="./index.ts"></script>
+  <script>
+    /* ===== AI-EDIT bridge (POC v2) — 编辑指令 + 反向状态推送（选中/页码 → 宿主） ===== */
+    (function () {
+      var getEditor = function () {
+        var frame = document.querySelector('iframe[name="frameEditor"]');
+        var win = frame && frame.contentWindow;
+        return win && (win.editor || (win.Asc && win.Asc.editor)) || null;
+      };
+
+      /* ===== 统一元素模型（用户交互契约 → AI 明确描述） ===== */
+      var getElInner = function (el) { try { return el.asc_getObjectValue ? el.asc_getObjectValue() : null; } catch (e) { return null; } };
+      var elHas = function (inner, n) { try { return !!(inner && typeof inner[n] === 'function'); } catch (e) { return false; } };
+      var elCall = function (inner, names) { for (var i = 0; i < names.length; i++) { try { var f = inner && inner[names[i]]; if (typeof f === 'function') { var v = f(); if (v != null) return v; } } catch (e) {} } return null; };
+      var classifyKind = function (el) {
+        var t = null; try { t = el.asc_getObjectType ? el.asc_getObjectType() : null; } catch (e) {}
+        var inner = getElInner(el);
+        if (t === 7) return 'slide';
+        if (t === 0) return 'text';
+        if (elHas(inner, 'asc_getVideoUrl') || elHas(inner, 'GetVideoUrl')) return 'video';
+        if (elHas(inner, 'asc_getAudioUrl')) return 'audio';
+        if (elHas(inner, 'asc_getImageUrl') || elHas(inner, 'GetImageUrl')) return 'image';
+        if (elHas(inner, 'asc_getChartProperties') || elHas(inner, 'GetChartType') || elHas(inner, 'asc_getChartType')) return 'chart';
+        if (elHas(inner, 'asc_getTableProperties') || elHas(inner, 'GetRowsCount')) return 'table';
+        if (elHas(inner, 'asc_getTextBody') || elHas(inner, 'asc_getCanEditText') || elHas(inner, 'asc_getTextArtProperties')) return 'textbox';
+        if (t === 6) return 'shape';
+        return 'unknown';
+      };
+      var actionsFor = function (kind) {
+        switch (kind) {
+          case 'textbox': case 'text': return ['setText', 'setStyle', 'delete', 'duplicate'];
+          case 'image': return ['setImage', 'delete', 'duplicate', 'setPosition'];
+          case 'video': return ['setVideo', 'delete', 'setPosition'];
+          case 'chart': return ['setTitle', 'delete', 'setPosition'];
+          case 'table': return ['setCell', 'delete', 'setPosition'];
+          case 'shape': return ['setStyle', 'delete', 'duplicate', 'setPosition'];
+          case 'slide': return ['duplicate', 'delete', 'move'];
+          default: return ['delete', 'duplicate'];
+        }
+      };
+      var describeOne = function (el) {
+        var kind = classifyKind(el);
+        var inner = getElInner(el);
+        var rec = { kind: kind };
+        try { var nm = elCall(inner, ['asc_getName', 'get_Name', 'asc_getTitle', 'get_Title']); if (nm != null && String(nm) !== 'frameEditor') rec.name = String(nm).slice(0, 120); } catch (e) {}
+        var g = {};
+        try {
+          var getP = function (n) { try { var f = inner && inner[n]; if (typeof f === 'function') { var v = f(); return (typeof v === 'number') ? v : null; } } catch (e) {} return null; };
+          var x = getP('asc_getX') || getP('get_X'), y = getP('asc_getY') || getP('get_Y');
+          var w = getP('asc_getWidth') || getP('get_Width'), h = getP('asc_getHeight') || getP('get_Height');
+          if (x != null && y != null) g = { x: Math.round(x), y: Math.round(y), w: Math.round(w || 0), h: Math.round(h || 0) };
+        } catch (e) {}
+        if (Object.keys(g).length) rec.geometry = g;
+        var content = {};
+        switch (kind) {
+          case 'textbox': case 'text': { var txt = elCall(inner, ['GetText', 'asc_getText', 'get_Text', 'GetTextContent']); if (txt != null) content.text = String(txt).slice(0, 400); break; }
+          case 'image': { var u = elCall(inner, ['asc_getImageUrl', 'GetImageUrl']); if (u != null) content.url = String(u).slice(0, 300); break; }
+          case 'video': { var uv = elCall(inner, ['asc_getVideoUrl', 'GetVideoUrl']); if (uv != null) content.url = String(uv).slice(0, 300); break; }
+          case 'chart': { var ct = elCall(inner, ['asc_getChartType', 'GetChartType']); if (ct != null) content.chartType = String(ct).slice(0, 80); var tt = elCall(inner, ['asc_getTitle', 'GetTitle']); if (tt != null) content.title = String(tt).slice(0, 120); break; }
+          case 'table': { var r = elCall(inner, ['GetRowsCount', 'asc_getRowsCount']), c = elCall(inner, ['GetColsCount', 'asc_getColsCount']); content.rows = r != null ? Number(r) : null; content.cols = c != null ? Number(c) : null; break; }
+          case 'shape': { var st = elCall(inner, ['asc_getType', 'get_Type']); if (st != null) content.shapeType = String(st).slice(0, 80); var tt2 = elCall(inner, ['asc_getTitle', 'GetTitle']); if (tt2 != null) content.title = String(tt2).slice(0, 120); break; }
+        }
+        if (Object.keys(content).length) rec.content = content;
+        rec.actions = actionsFor(kind);
+        return rec;
+      };
+      var normalizeInteraction = function (editor) {
+        var st = { at: Date.now(), page: null, action: { type: 'none', detail: '无操作' }, selection: { mode: 'none', kind: 'none', elements: [] }, selectedElement: null };
+        var st0 = 'none';
+        try { st0 = editor.pluginMethod_GetSelectionType ? editor.pluginMethod_GetSelectionType() : 'none'; } catch (e) {}
+        var selText = '';
+        try { selText = editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''; } catch (e) {}
+        var pageFns = ['GetCurrentPage', 'getCurrentPage', 'GetCurrentVisiblePage', 'GetCurrentSlideNumber', 'GetCurrentSlide'];
+        for (var i = 0; i < pageFns.length; i++) { try { var v = editor[pageFns[i]] ? editor[pageFns[i]]() : undefined; if (v != null) { st.page = Number(v) + 1; break; } } catch (e) {} }
+        var els = [];
+        try { els = editor.getSelectedElements ? editor.getSelectedElements() : []; } catch (e) {}
+        var descs = [];
+        for (var j = 0; j < els.length && j < 8; j++) descs.push(describeOne(els[j]));
+        st.selection.elements = descs;
+        if (selText) {
+          st.selection.mode = 'text'; st.selection.kind = 'text'; st.selection.text = selText.slice(0, 500);
+          st.action.type = 'select'; st.action.detail = '选择文字';
+        } else if (st0 !== 'none' && st0 != null) {
+          st.selection.mode = 'object';
+          var mainKind = 'unknown';
+          for (var k2 = 0; k2 < descs.length; k2++) { if (descs[k2].kind !== 'slide' && descs[k2].kind !== 'animation') { mainKind = descs[k2].kind; break; } }
+          if (mainKind === 'unknown') for (var k3 = 0; k3 < descs.length; k3++) { if (descs[k3].kind !== 'animation') { mainKind = descs[k3].kind; break; } }
+          st.selection.kind = mainKind;
+          st.action.type = 'select'; st.action.detail = '点选元素（' + mainKind + '）';
+        } else {
+          st.selection.mode = 'none'; st.action.type = 'none'; st.action.detail = '无选中';
+        }
+        /* 从 spTree 读用户选中的元素（selected=true）→ 收集全部（支持多选/框选） */
+        st.selectedElements = [];
+        try {
+          var ld = editor.WordControl.m_oLogicDocument;
+          for (var si = 0; si < ld.Slides.length; si++) {
+            var spx = ld.Slides[si].cSld.spTree;
+            if (!spx) continue;
+            for (var jj = 0; jj < spx.length; jj++) {
+              var shx = spx[jj];
+              if (shx.selected) {
+                var info = { pageIdx: si, shapeIdx: jj, kind: 'shape' };
+                try { info.name = shx.name != null ? String(shx.name) : null; } catch (e) {}
+                try { info.x = shx.GetPosX ? shx.GetPosX() : shx.x; info.y = shx.GetPosY ? shx.GetPosY() : shx.y; info.w = shx.extX; info.h = shx.extY; } catch (e) {}
+                /* 按类型默认提供 value */
+                try { var dcx = shx.getDocContent ? shx.getDocContent() : null; if (dcx && typeof dcx.GetText === 'function') { var tt = String(dcx.GetText()); if (tt.trim()) { info.kind = 'textbox'; info.value = tt.replace(/\r\n/g, '\\n').slice(0, 400); } } } catch (e) {}
+                try { if (shx.videoLink) { info.kind = 'video'; info.value = { name: info.name, url: String(shx.videoLink) }; } } catch (e) {}
+                try { if (shx.audioLink) { info.kind = 'audio'; info.value = { name: info.name, url: String(shx.audioLink) }; } } catch (e) {}
+                try { if (shx.getDrawingBaseType) { var dbt = shx.getDrawingBaseType(); if (dbt && String(dbt).toLowerCase().indexOf('image') !== -1) { info.kind = 'image'; } } } catch (e) {}
+                st.selectedElements.push(info);
+                if (st.action.type !== 'select') { st.action.type = 'select'; st.action.detail = '点选元素' + (info.kind ? '（' + info.kind + '）' : '') + (st.selectedElements.length > 1 ? '（多选' + st.selectedElements.length + '）' : ''); }
+              }
+            }
+          }
+          /* 向后兼容：单选场景 still 暴露 selectedElement（取第一个） */
+          st.selectedElement = st.selectedElements.length === 1 ? st.selectedElements[0] : (st.selectedElements.length > 1 ? st.selectedElements : null);
+        } catch (e) {}
+        return st;
+      };
+      /* 事件推送 / 主动查询统一走 normalizeInteraction */
+      var readState = normalizeInteraction;
+
+      /* 反向推送（节流 250ms）→ viewer */
+      var lastPush = 0;
+      var pushState = function () {
+        var now = Date.now();
+        if (now - lastPush < 250) return;
+        lastPush = now;
+        var editor = getEditor();
+        if (!editor) return;
+        try { window.parent.postMessage({ aiEvent: true, state: readState(editor) }, '*'); } catch (e) {}
+      };
+
+      /* 编辑器就绪后注册事件（幂等，轮询探测注册时机） */
+      var registerEvents = function () {
+        var editor = getEditor();
+        if (!editor || editor.__aiEvents) return;
+        editor.__aiEvents = true;
+        var evs = ['asc_onEditorSelectionChanged', 'asc_onCurrentVisiblePage', 'asc_onDocumentChanged', 'asc_onSelectionEnd'];
+        for (var i = 0; i < evs.length; i++) {
+          (function (name) {
+            try { editor.asc_registerCallback(name, function () { pushState(); }); } catch (e) {}
+          })(evs[i]);
+        }
+      };
+      setInterval(registerEvents, 1200);
+
+      /* JSON 参数里没法带函数 → __fn / __fns 占位符 */
+      var materialize = function (a) {
+        if (a && typeof a === 'object' && a.__fn) { var o = {}; o[a.__fn] = function () { return a.returns; }; return o; }
+        if (a && typeof a === 'object' && a.__fns) { var o3 = {}; Object.keys(a.__fns).forEach(function (k) { o3[k] = function () { return a.__fns[k]; }; }); return o3; }
+        if (Array.isArray(a)) return a.map(materialize);
+        if (a && typeof a === 'object') { var o2 = {}; Object.keys(a).forEach(function (k) { o2[k] = materialize(a[k]); }); return o2; }
+        return a;
+      };
+
+      window.addEventListener('message', function (e) {
+        var m = e.data;
+        if (!m || !m.aiEdit) return;
+        var reply = function (payload) { try { e.source.postMessage({ aiEdit: true, id: m.id, result: payload }, '*'); } catch (_) {} };
+        var done = function (data) { reply({ ok: true, op: m.op, data: data }); };
+        var fail = function (err) { reply({ ok: false, op: m.op, error: (err && err.message) ? err.message : String(err) }); };
+        var op = m.op;
+        try {
+          var editor = getEditor();
+          if (!editor) { fail(new Error('OnlyOffice editor not ready (window.editor missing)')); return; }
+          switch (op) {
+            case 'getState':
+              done(readState(editor));
+              break;
+            /* 动态注入：AI 传代码 → new Function 执行（调试用，免改文件重载） */
+            case 'eval': {
+              var code = String(m.code || '');
+              if (!code) { fail(new Error('eval requires code')); break; }
+              try {
+                var fn = new Function('editor', 'ctx', 'return (' + code + ')');
+                var result = fn(editor, { readState: readState, classifyKind: classifyKind, describeOne: describeOne, getEditor: getEditor });
+                var out;
+                if (result === undefined || result === null) out = null;
+                else if (typeof result === 'string') out = result.slice(0, 4000);
+                else { try { out = JSON.stringify(result); if (out && out.length > 4000) out = out.slice(0, 4000); } catch (e) { out = '[unserializable]'; } }
+                done({ ok: true, result: out });
+              } catch (e) { fail(e); }
+              break;
+            }
+            /* 复合 op：styleText —— find 定位文本 + 一次应用 对齐/字体/颜色/粗体/斜体/字号 */
+            case 'styleText': {
+              var find = String(m.find || '');
+              if (!find) { fail(new Error('styleText requires find')); break; }
+              try {
+                var applied = {};
+                /* 移动元素（按 find 文本定位 shape → shiftXfrm） */
+                if ((m.moveX || m.moveY) && editor.WordControl) {
+                  try {
+                    var ld2 = editor.WordControl.m_oLogicDocument;
+                    outer: for (var si2 = 0; si2 < ld2.Slides.length; si2++) {
+                      var sp2 = ld2.Slides[si2].cSld.spTree;
+                      if (!sp2) continue;
+                      for (var jj = 0; jj < sp2.length; jj++) {
+                        try {
+                          var dc2 = sp2[jj].getDocContent ? sp2[jj].getDocContent() : null;
+                          var tt = dc2 && typeof dc2.GetText === 'function' ? String(dc2.GetText()) : '';
+                          if (tt.indexOf(find) !== -1) {
+                            sp2[jj].shiftXfrm(Number(m.moveX) || 0, Number(m.moveY) || 0);
+                            try { if (sp2[jj].recalcTransform) sp2[jj].recalcTransform(); } catch (e) {}
+                            try { if (sp2[jj].updateTransformMatrix) sp2[jj].updateTransformMatrix(); } catch (e) {}
+                            applied.move = { x: Number(m.moveX) || 0, y: Number(m.moveY) || 0, pageIdx: si2, shapeIdx: jj };
+                            break outer;
+                          }
+                        } catch (e) {}
+                      }
+                    }
+                  } catch (e) { applied.moveErr = e.message; }
+                }
+                var opts = { GetText: function () { return find; }, IsMatchCase: function () { return !!m.matchCase; }, IsWholeWords: function () { return false; } };
+                var found = editor.asc_findText(opts);
+                var started = Date.now();
+                var applyStyle = function () {
+                  var sel = '';
+                  try { sel = editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''; } catch (e) {}
+                  if (sel && (sel === find || sel.indexOf(find) === 0)) {
+                    var applied2 = applied;
+                    if (m.align !== undefined && typeof editor.put_PrAlign === 'function') { try { editor.put_PrAlign(Number(m.align)); applied.align = Number(m.align); } catch (e) { applied.alignErr = e.message; } }
+                    if (m.font && typeof editor.put_TextPrFontName === 'function') { try { editor.put_TextPrFontName(String(m.font)); applied.font = String(m.font); } catch (e) { applied.fontErr = e.message; } }
+                    if (Array.isArray(m.color) && m.color.length === 3 && typeof editor.put_TextColor2 === 'function') { try { editor.put_TextColor2(Number(m.color[0]), Number(m.color[1]), Number(m.color[2])); applied.color = m.color; } catch (e) { applied.colorErr = e.message; } }
+                    if (m.bold !== undefined && typeof editor.put_TextPrBold === 'function') { try { editor.put_TextPrBold(!!m.bold); applied.bold = !!m.bold; } catch (e) {} }
+                    if (m.italic !== undefined && typeof editor.put_TextPrItalic === 'function') { try { editor.put_TextPrItalic(!!m.italic); applied.italic = !!m.italic; } catch (e) {} }
+                    if (m.fontSize && typeof editor.put_TextPrFontSize === 'function') { try { editor.put_TextPrFontSize(Number(m.fontSize)); applied.fontSize = Number(m.fontSize); } catch (e) {} }
+                    try { if (editor.asc_endFindText) editor.asc_endFindText(); } catch (e) {}
+                    setTimeout(function () { done({ styled: true, find: find, applied: applied, matched: Number(found) }); }, 200);
+                  } else if (Date.now() - started < 8000) {
+                    setTimeout(applyStyle, 300);
+                  } else {
+                    done({ styled: false, note: 'find did not select target', selectedText: sel });
+                  }
+                };
+                setTimeout(applyStyle, 400);
+              } catch (e) { fail(e); }
+              break;
+            }
+            /* 逻辑文档探测 v6：graphicObjects.drawingObjects → shape 数组 */
+            case 'probeDoc': {
+              var out = {};
+              try {
+                var ld = editor.WordControl.m_oLogicDocument;
+                var slides = ld.Slides;
+                out.slidesCount = slides ? slides.length : 0;
+                var go = slides[0].graphicObjects;
+                var dobj = go && go.drawingObjects;
+                out.dobjFields = Object.getOwnPropertyNames(dobj || {}).slice(0, 50);
+                try {
+                  var arrKeys = Object.getOwnPropertyNames(dobj || {}).filter(function (k) { return Array.isArray(dobj[k]); });
+                  out.dobjArrKeys = arrKeys.map(function (k) { return k + ':' + dobj[k].length; });
+                } catch (e) { out.arrErr = e.message; }
+                // 尝试常见 shape 数组名
+                var shapes = dobj && (dobj.m_arrObjects || dobj.objects || dobj.arrObjects || dobj.drawings || dobj.m_arrDrawings);
+                if (Array.isArray(shapes) && shapes.length) {
+                  out.shapeCount = shapes.length;
+                  var sh = shapes[0];
+                  out.shapeFields = Object.getOwnPropertyNames(sh).slice(0, 50);
+                  try {
+                    var inner = sh.asc_getObjectValue ? sh.asc_getObjectValue() : sh;
+                    out.innerFields = Object.getOwnPropertyNames(inner).slice(0, 60);
+                    ['GetText', 'asc_getText', 'get_Text', 'GetStringValue', 'asc_getStringValue', 'asc_getContent', 'GetContent'].forEach(function (n) {
+                      try { if (typeof inner[n] === 'function') { var v = inner[n](); if (v != null) out['call:' + n] = typeof v === 'string' ? v.slice(0, 300) : (Array.isArray(v) ? '[arr ' + v.length + ']' : '[obj]'); } } catch (e) { out['err:' + n] = e.message; }
+                    });
+                    try { if (typeof inner.asc_getParagraphs === 'function') { var ps = inner.asc_getParagraphs(); out.paras = ps ? ps.length : 0; } } catch (e) {}
+                  } catch (e) { out.shapeInnerErr = e.message; }
+                } else {
+                  out.shapesNotFound = true;
+                }
+              } catch (e) { out.err = e.message; }
+              done(out);
+              break;
+            }
+            /* 对象选中：字段+方法双重反射，挖文本存储（渲染就是从这里读的） */
+            case 'probeText': {
+              var selEls = editor.getSelectedElements ? editor.getSelectedElements() : [];
+              var out = { selectionType: (editor.pluginMethod_GetSelectionType ? editor.pluginMethod_GetSelectionType() : null), items: [] };
+              for (var pi = 0; pi < selEls.length && pi < 8; pi++) {
+                var el = selEls[pi], rec = { i: pi, type: '?' };
+                try { rec.type = el.asc_getObjectType ? el.asc_getObjectType() : '?'; } catch (e) {}
+                try {
+                  var inner = el.asc_getObjectValue ? el.asc_getObjectValue() : null;
+                  if (inner) {
+                    try { rec.ctor = inner.constructor ? inner.constructor.name : null; } catch (e) {}
+                    try { rec.fields = Object.keys(inner).slice(0, 40); } catch (e) {}
+                    ['asc_getText', 'GetText', 'get_Text', 'asc_getStringValue', 'GetStringValue', 'asc_getContent', 'asc_getParagraphs', 'asc_getTextBody', 'get_Content'].forEach(function (n) {
+                      try { if (typeof inner[n] === 'function') { var v = inner[n](); if (v != null) rec['call:' + n] = typeof v === 'string' ? v.slice(0, 200) : (Array.isArray(v) ? '[array ' + v.length + ']' : '[obj]'); } } catch (e) { rec['err:' + n] = e.message; }
+                    });
+                    try {
+                      if (typeof inner.asc_getParagraphs === 'function') {
+                        var ps = inner.asc_getParagraphs();
+                        rec.paras = ps ? ps.length : 0;
+                        var texts = [];
+                        for (var k = 0; k < (ps ? ps.length : 0) && k < 20; k++) {
+                          var p = ps[k];
+                          try { if (p && typeof p.asc_getText === 'function') texts.push(String(p.asc_getText())); else if (p && typeof p.GetText === 'function') texts.push(String(p.GetText())); } catch (e) {}
+                        }
+                        rec.paraTexts = texts.join(' / ').slice(0, 600);
+                      }
+                    } catch (e) { rec.parasErr = e.message; }
+                    try {
+                      var keys = Object.keys(inner);
+                      for (var fi = 0; fi < keys.length; fi++) {
+                        var fk = keys[fi];
+                        if (/text|body|para|content|run/i.test(fk)) {
+                          try { var fv = inner[fk]; rec['field:' + fk] = (typeof fv === 'string' ? fv.slice(0, 150) : (fv && Array.isArray(fv) ? '[array ' + fv.length + ']' : (fv && typeof fv === 'object' ? '[obj]' : String(fv)))); } catch (e) {}
+                        }
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) { rec.err = e.message; }
+                out.items.push(rec);
+              }
+              done(out);
+              break;
+            }
+            /* 保存导出：实测多种导出 API（v9.3 PPT） */
+            case 'export': {
+              var format = String(m.format || 'pptx');
+              var out = { format: format, results: {} };
+              try { out.results.convertDocument = editor.pluginMethod_ConvertDocument ? String(editor.pluginMethod_ConvertDocument(format)) : 'no-fn'; } catch (e) { out.results.convertDocument = 'err:' + e.message; }
+              try { out.results.getFileToDownload = editor.pluginMethod_GetFileToDownload ? String(editor.pluginMethod_GetFileToDownload()) : 'no-fn'; } catch (e) { out.results.getFileToDownload = 'err:' + e.message; }
+              try { out.results.ascDownloadAs = editor.asc_DownloadAs ? String(editor.asc_DownloadAs(format)) : 'no-fn'; } catch (e) { out.results.ascDownloadAs = 'err:' + e.message; }
+              try { out.results.ascSave = editor.asc_Save ? String(editor.asc_Save()) : 'no-fn'; } catch (e) { out.results.ascSave = 'err:' + e.message; }
+              done(out);
+              break;
+            }
+            /* 对象选中（框）时：进入文本编辑 + 全选该框全部文字 → 读全文（替换时即可复用选中替换） */
+            case 'readShapeText': {
+              var before = '';
+              try { before = editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''; } catch (e) {}
+              try { if (typeof editor.SetTextBoxInputMode === 'function') editor.SetTextBoxInputMode(true); } catch (e) {}
+              try { if (typeof editor.asc_EditSelectAll === 'function') editor.asc_EditSelectAll(); } catch (e) {}
+              var after = '';
+              try { after = editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''; } catch (e) {}
+              var state2 = readState(editor);
+              done({ before, after, shapeName: (state2.elements && state2.elements.length ? state2.elements[0].name : null), page: state2.page });
+              break;
+            }
+            /* 框选替换：选中 shape → 全选全文 → 整体替换为新文字 */
+            case 'replaceShapeText': {
+              var newText = String(m.text || '');
+              try { if (typeof editor.SetTextBoxInputMode === 'function') editor.SetTextBoxInputMode(true); } catch (e) {}
+              try { if (typeof editor.asc_EditSelectAll === 'function') editor.asc_EditSelectAll(); } catch (e) {}
+              var oldText = '';
+              try { oldText = editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''; } catch (e) {}
+              var replaced = false;
+              if (typeof editor.pluginMethod_PasteText === 'function') { editor.pluginMethod_PasteText(newText); replaced = true; }
+              done({ replaced, oldText, newText });
+              break;
+            }
+            /* 批注：构造 Asc.asc_CCommentData 并 asc_addComment 到当前选中 */
+            case 'addComment': {
+              var cFrame = document.querySelector('iframe[name="frameEditor"]');
+              var cAsc = cFrame && cFrame.contentWindow && cFrame.contentWindow.Asc;
+              if (!cAsc) { fail(new Error('Asc namespace not available')); break; }
+              var Ctor = cAsc.asc_CCommentData || cAsc.asc_CCommentDataWord;
+              if (!Ctor) { fail(new Error('no asc_CCommentData ctor')); break; }
+              var c = new Ctor();
+              if (typeof c.asc_putText === 'function') c.asc_putText(String(m.text || ''));
+              if (typeof c.asc_putUserName === 'function') c.asc_putUserName(String(m.user || 'AI'));
+              if (typeof c.asc_putUserId === 'function') c.asc_putUserId(String(m.userId || 'ai-helper'));
+              var r = editor.asc_addComment(c);
+              done({ added: true, text: String(m.text || ''), ret: r == null ? null : String(r) });
+              break;
+            }
+            /* 图片：读当前选中图片数据 / 写图片数据到选中 */
+            case 'image': {
+              var op2 = m.sub || 'get';
+              var out = {};
+              if (op2 === 'get') {
+                try {
+                  var d = editor.pluginMethod_GetImageDataFromSelection ? editor.pluginMethod_GetImageDataFromSelection() : null;
+                  if (d == null) out.data = null;
+                  else if (typeof d === 'string') out.data = d.slice(0, 500);
+                  else if (typeof d === 'object') {
+                    var probe = {};
+                    Object.keys(d).forEach(function (k) { var v = d[k]; probe[k] = typeof v === 'string' ? v.slice(0, 80) : (typeof v === 'number' ? v : '[obj]'); });
+                    out.data = probe;
+                  } else out.data = String(d);
+                } catch (e) { out.err = e.message; }
+              } else {
+                try { editor.pluginMethod_PutImageDataToSelection(String(m.data || '')); out.put = true; } catch (e) { out.err = e.message; }
+              }
+              done(out);
+              break;
+            }
+            case 'probeEnum': {
+              var eFrame = document.querySelector('iframe[name="frameEditor"]');
+              var eAsc = eFrame && eFrame.contentWindow && eFrame.contentWindow.Asc;
+              var enums = {};
+              ['c_oAscTypeSelectElement', 'c_oAscSelectionType'].forEach(function (name) {
+                try {
+                  if (eAsc && eAsc[name]) { var o = eAsc[name], r = {}; Object.keys(o).forEach(function (k) { r[k] = o[k]; }); enums[name] = r; }
+                } catch (e) { enums[name] = 'err:' + e.message; }
+              });
+              done({ enums: enums });
+              break;
+            }
+            case 'probeScope': {
+              var pFrame = document.querySelector('iframe[name="frameEditor"]');
+              var pw = pFrame && pFrame.contentWindow;
+              var scope = pw && pw.Asc && pw.Asc.scope;
+              var out = { hasScope: !!scope, scopeKeys: scope ? Object.keys(scope).slice(0, 60) : null };
+              try { out.winApi = typeof pw.Api; } catch (e) {}
+              try { if (pw && pw.Asc && pw.Asc.scope) { out.createPresentation = typeof pw.Asc.scope.CreatePresentation; out.createDocument = typeof pw.Asc.scope.CreateDocument; } } catch (e) {}
+              done(out);
+              break;
+            }
+            case 'probeSelection': {
+              var els = editor.getSelectedElements ? editor.getSelectedElements() : [];
+              var out = [];
+              for (var si = 0; si < els.length && si < 8; si++) {
+                var el = els[si], rec = { i: si };
+                try { rec.type = el.asc_getObjectType ? el.asc_getObjectType() : '?'; } catch (e) {}
+                try {
+                  var inner = el.asc_getObjectValue ? el.asc_getObjectValue() : null;
+                  if (inner && typeof inner === 'object') {
+                    try {
+                      var ip = Object.getPrototypeOf(inner);
+                      rec.innerMethods = ip ? Object.getOwnPropertyNames(ip).filter(function (n) { return typeof inner[n] === 'function'; }) : [];
+                    } catch (e) {}
+                    var tf = ['GetText', 'asc_getText', 'get_Text', 'GetTextContent', 'GetStringValue', 'asc_getStringValue', 'GetValue'];
+                    for (var tj = 0; tj < tf.length; tj++) {
+                      try { if (typeof inner[tf[tj]] === 'function') { var tv = inner[tf[tj]](); if (tv != null) rec.innerText = String(tv).slice(0, 200); } } catch (e2) {}
+                    }
+                  } else { rec.inner = String(inner); }
+                } catch (e) { rec.innerErr = String(e).slice(0, 120); }
+                out.push(rec);
+              }
+              done({
+                selectionType: editor.pluginMethod_GetSelectionType ? editor.pluginMethod_GetSelectionType() : null,
+                selectedText: editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : '',
+                page: (function () { try { return editor.GetCurrentPage ? editor.GetCurrentPage() + 1 : null; } catch (e) { return null; } })(),
+                elements: out,
+              });
+              break;
+            }
+            case 'getSelectedText':
+              done({
+                type: editor.pluginMethod_GetSelectionType ? editor.pluginMethod_GetSelectionType() : 'n/a',
+                text: editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : '',
+              });
+              break;
+            case 'goSlide':
+              if (typeof editor.pluginMethod_GoToSlide === 'function') editor.pluginMethod_GoToSlide(Number(m.slide) || 0);
+              done({ slide: Number(m.slide) || 0 });
+              break;
+            case 'goToPage': {
+              var target = Number(m.page);
+              var ok2 = false;
+              if (typeof editor.GoToPage === 'function') { editor.GoToPage(target); ok2 = true; }
+              else if (typeof editor.asc_GoToPage === 'function') { editor.asc_GoToPage(target); ok2 = true; }
+              done({ page: target, applied: ok2 });
+              break;
+            }
+            case 'selectAll':
+              if (typeof editor.asc_EditSelectAll === 'function') editor.asc_EditSelectAll();
+              done({ ok: true });
+              break;
+            case 'inputText':
+              if (typeof editor.pluginMethod_InputText === 'function') editor.pluginMethod_InputText(String(m.text || ''));
+              else if (typeof editor.pluginMethod_PasteText === 'function') editor.pluginMethod_PasteText(String(m.text || ''));
+              done({ text: String(m.text || '') });
+              break;
+            case 'pasteHtml':
+              if (typeof editor.pluginMethod_PasteHtml === 'function') editor.pluginMethod_PasteHtml(String(m.text || ''));
+              done({ text: String(m.text || '') });
+              break;
+            /* 复合 op：查找 → 确认选中 → 替换 → 返回（一轮完成） */
+            case 'replaceText': {
+              var find = String(m.find || ''), rep = String(m.replace || '');
+              if (!find) { fail(new Error('replaceText requires find')); break; }
+              var opts = {
+                GetText: function () { return find; },
+                IsMatchCase: function () { return !!m.matchCase; },
+                IsWholeWords: function () { return !!m.wholeWords; },
+              };
+              var found = editor.asc_findText(opts);
+              var started = Date.now();
+              var tryReplace = function () {
+                var sel = '';
+                try { sel = editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''; } catch (_) {}
+                if (sel === find) {
+                  var replaced = false;
+                  if (typeof editor.pluginMethod_PasteText === 'function') { editor.pluginMethod_PasteText(rep); replaced = true; }
+                  else if (typeof editor.pluginMethod_InputText === 'function') { editor.pluginMethod_InputText(rep); replaced = true; }
+                  var note = '';
+                  try { if (editor.asc_endFindText) editor.asc_endFindText(); } catch (_) {}
+                  setTimeout(function () { done({ replaced: replaced, find: find, replace: rep, matched: Number(found) }); }, 250);
+                } else if (Date.now() - started < 8000) {
+                  setTimeout(tryReplace, 300);
+                } else {
+                  done({ replaced: false, find: find, matched: Number(found), note: 'find did not select the target', selectedText: sel });
+                }
+              };
+              setTimeout(tryReplace, 400);
+              break;
+            }
+            case 'exec': {
+              var fn = editor[m.method];
+              if (typeof fn !== 'function') { fail(new Error('no such method on editor: ' + m.method)); break; }
+              var args = materialize(Array.isArray(m.args) ? m.args : []);
+              var ret = fn.apply(editor, args);
+              done({ method: m.method, ret: ret == null ? null : String(ret) });
+              break;
+            }
+            case 'inspect': {
+              var keys = [], p = editor, n = 0;
+              while (p && n < 20) { keys = keys.concat(Object.getOwnPropertyNames(p)); p = Object.getPrototypeOf(p); n++; }
+              var uniq = keys.filter(function (v, i) { return keys.indexOf(v) === i; });
+              var plugin = uniq.filter(function (k) { return k.indexOf('pluginMethod_') === 0 && typeof editor[k] === 'function'; }).sort();
+              done({
+                version: editor.pluginMethod_GetVersion ? editor.pluginMethod_GetVersion() : 'n/a',
+                selection: editor.pluginMethod_GetSelectionType ? editor.pluginMethod_GetSelectionType() : 'n/a',
+                pluginMethods: plugin,
+              });
+              break;
+            }
+            default:
+              fail(new Error('unknown aiEdit op: ' + op));
+          }
+        } catch (err) { fail(err); }
+      });
+    })();
+  </script>
 </html>
