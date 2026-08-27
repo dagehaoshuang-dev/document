@@ -122,23 +122,43 @@ function routeSavedFile(file: File): void {
     return;
   }
 
-  if (isEmbedMode()) {
-    console.warn('Local save is disabled in iframe embed mode. Use document:save from the parent page.');
-    return;
-  }
-
-  const reachedDisk = (): void => {
-    // Reaching the user's disk is the only thing that clears the unsaved-changes
-    // warning: an autosave snapshot lives in this browser, a saved file does not.
-    markDocumentSaved();
+  // Normalize spacing before inspecting mode/disk handling below.
+  const embedBytes = async (): Promise<boolean> => {
+    if (!isEmbedMode()) return false;
+    // Embed mode used to drop the bytes on the floor. Instead, write them into
+    // the current autosave row so a manual save survives a refresh of the host
+    // page (the same recovery path autosave uses).
+    const { getAutosaveDocId, takeSnapshot } = await import('../history/autosave');
+    const existingId = getAutosaveDocId();
+    if (!existingId) return false;
+    const { putSnapshot } = await import('../history/store');
+    const doc = await putSnapshot({
+      id: existingId,
+      title: file.name,
+      origin: 'url',
+      bytes: await file.arrayBuffer(),
+    });
+    if (!doc) return false;
+    try {
+      markDocumentSaved();
+    } catch {
+      /* unsaved-guard is side-effect free to call */
+    }
     savedToDiskListener?.();
+    return true;
   };
 
-  // Write back to the document's own file where that is possible, and download
-  // a copy where it is not. Both end in the same place from the app's point of
-  // view: the bytes are on the user's disk.
   void (async () => {
     try {
+      if ((await embedBytes()) !== false) return;
+      const reachedDisk = (): void => {
+        // Reaching the user's disk is the only thing that clears the unsaved-changes
+        // warning: an autosave snapshot lives in this browser, a saved file does not.
+        markDocumentSaved();
+        savedToDiskListener?.();
+      };
+      // Write back to the document's own file where that is possible, and
+      // download a copy where it is not.
       if (await diskWriter?.(file)) {
         reachedDisk();
         return;

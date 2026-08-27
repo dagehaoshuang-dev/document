@@ -192,6 +192,15 @@ async function handleMessage(event: MessageEvent): Promise<void> {
         const file = await requestSaveDocument(payload.targetExt || defaultExt, {
           returnOriginalOnTimeout: Boolean(payload.returnOriginalOnTimeout),
         });
+        // Persist the saved bytes into the current autosave row so a manual
+        // save also survives a refresh of the host page -- even if the host
+        // never writes them anywhere on its side.
+        await import('./history/autosave').then(async ({ getAutosaveDocId }) => {
+          const docId = getAutosaveDocId();
+          if (!docId) return;
+          const { putSnapshot } = await import('./history/store');
+          await putSnapshot({ id: docId, title: file.name, origin: 'url', bytes: await file.arrayBuffer() });
+        });
         postToParent(
           'document:saved',
           {

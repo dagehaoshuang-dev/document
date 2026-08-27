@@ -169,16 +169,20 @@ if (documentUrl || isEmbedded || createNewOnLoad || openLocalOnLoad || savedPara
 }
 
 void (async () => {
-  // A stored snapshot wins over every other way of opening: it is strictly
-  // newer than the file on disk or the blank document the other parameters
-  // would produce, and it is the copy nobody else has.
-  if (savedParam && !isEmbedded) {
-    const [{ getDoc }, { restoreDocument }] = await Promise.all([
+  if (savedParam || documentUrl) {
+    const [{ getDoc }, { restoreDocument }, { stableDocIdFor }] = await Promise.all([
       import('./lib/history/store'),
       import('./lib/history/recovery'),
+      import('./lib/document'),
     ]);
-    const doc = await getDoc(savedParam);
-    if (doc && (await restoreDocument(doc))) return;
+    // Prefer an explicit `?saved=` row; without one, fall back to the stable
+    // id derived from the source URL so an embedded editor (whose host frames
+    // the editor without a saved param) still recovers its autosave on reload.
+    const candidateId = savedParam || (documentUrl ? stableDocIdFor(decodeURIComponent(documentUrl)) : null);
+    if (candidateId) {
+      const doc = await getDoc(candidateId);
+      if (doc && (await restoreDocument(doc))) return;
+    }
     // No snapshot yet (nothing was edited before the reload) or it expired:
     // fall through and open the same document again under the same id.
   }

@@ -123,6 +123,20 @@ export const onOpenDocument = (): void => {
   fileInput.click();
 };
 
+/**
+ * Deterministic docId for documents opened by URL. A reload (even without
+ * `?saved=`) resolves to the same autosave row, so edits made in an embedded
+ * editor survive a refresh of the hosting page.
+ */
+export function stableDocIdFor(url: string): string {
+  try {
+    const u = new URL(url, window.location.href);
+    return 'src:' + u.pathname.replace(/^\//, '');
+  } catch {
+    return 'src:' + url;
+  }
+}
+
 export const openDocumentFromUrl = async (
   url: string,
   fileName?: string,
@@ -196,7 +210,14 @@ export const openDocumentFromUrl = async (
       isNew: !fileBlob,
       readonly: options?.readonly,
     });
-    startDocumentSession({ title: docFileName, origin: 'url', docId: options?.docId });
+    // Use the caller-provided docId (a `?saved=` reload continues the same row)
+    // or fall back to a deterministic id derived from the source URL so an
+    // embedded editor's edits survive a host-page refresh even without `?saved=`.
+    startDocumentSession({
+      title: docFileName,
+      origin: 'url',
+      docId: options?.docId || stableDocIdFor(url),
+    });
   } catch (error) {
     console.error('Error opening document from URL:', error);
     alert(`Failed to open document: ${error instanceof Error ? error.message : 'Unknown error'}`);

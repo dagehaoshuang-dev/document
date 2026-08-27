@@ -46,12 +46,17 @@ import type { HistoryDoc, HistoryOrigin } from './types';
  * 60 s, and a 600 ms export on a slow phone backs off to the 180 s ceiling.
  * The device decides, by being fast or slow, and nobody has to detect it.
  */
-export const MIN_SNAPSHOT_INTERVAL_MS = 30_000;
-export const MAX_SNAPSHOT_INTERVAL_MS = 180_000;
-/** Export time as a fraction of elapsed time: 1/300 is 0.33% of the session. */
-export const EXPORT_DUTY_CYCLE = 300;
+/**
+ * Time-between-snapshots budget. The original values were tuned for phones
+ * exporting hundreds of megabytes on a weak link; a local POC stores small
+ * documents and should snapshot almost immediately after an edit.
+ */
+export const MIN_SNAPSHOT_INTERVAL_MS = 1_000;
+export const MAX_SNAPSHOT_INTERVAL_MS = 10_000;
+/** Export time as a fraction of elapsed time: 1/20 is 5% of the session. */
+export const EXPORT_DUTY_CYCLE = 20;
 /** Interval used before anything has been exported and timed. */
-export const SNAPSHOT_INTERVAL_MS = 60_000;
+export const SNAPSHOT_INTERVAL_MS = 2_000;
 
 /** The interval an export of `exportMs` earns. */
 export function snapshotInterval(exportMs: number | null): number {
@@ -59,9 +64,9 @@ export function snapshotInterval(exportMs: number | null): number {
   return Math.min(MAX_SNAPSHOT_INTERVAL_MS, Math.max(MIN_SNAPSHOT_INTERVAL_MS, exportMs * EXPORT_DUTY_CYCLE));
 }
 /** How often the conditions are re-checked. Cheap: it is a handful of comparisons. */
-export const TICK_MS = 15_000;
+export const TICK_MS = 1_000;
 /** Quiet time after the last edit before an export is allowed to start. */
-export const IDLE_GRACE_MS = 2_000;
+export const IDLE_GRACE_MS = 500;
 /** Consecutive export failures before this session gives up. */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
@@ -248,7 +253,10 @@ function tick(): void {
  */
 export async function beginAutosaveSession(input: AutosaveSessionInput): Promise<void> {
   stopAutosaveSession();
-  if (typeof window === 'undefined' || isEmbedMode() || !isAutosaveEnabled()) return;
+  // Embed mode used to disable autosave ("the document belongs to someone
+  // else's page"), but a host that opens `?src=` files still wants its edits
+  // recovered on reload. Keep writing snapshots in embed mode too.
+  if (typeof window === 'undefined' || !isAutosaveEnabled()) return;
 
   const ext = extensionOf(input.title);
   // Without an extension there is no export format to ask for. (PDFs and every

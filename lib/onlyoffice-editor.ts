@@ -135,6 +135,9 @@ async function queueEditorOperation<T>(operation: () => Promise<T>): Promise<T> 
 // next document replaces it.
 let currentDocumentBlobUrl: string | null = null;
 
+// Debounce timer for edit-triggered snapshots (see onDocumentStateChange).
+let editSnapshotTimer: number | undefined;
+
 /**
  * v9 editor creation against the OnlyOffice Personal vendor build. Unlike the
  * old Web Mode path, this build is driven entirely through the public
@@ -300,6 +303,15 @@ function createPersonalEditorInstance(config: {
           markDocumentSaved();
         } else {
           markDocumentDirty();
+          // Edit-triggered snapshot: debounce so a reload / card switch that
+          // happens right after an edit still recovers the latest content,
+          // instead of depending on the autosave metronome's interval.
+          if (typeof window !== 'undefined') {
+            if (editSnapshotTimer) clearTimeout(editSnapshotTimer);
+            editSnapshotTimer = window.setTimeout(() => {
+              void import('./history/autosave').then(({ takeSnapshot }) => takeSnapshot());
+            }, 800);
+          }
         }
       },
       // Must be declared even as a no-op: the api layer only runs downloadAs
