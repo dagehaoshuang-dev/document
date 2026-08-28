@@ -322,11 +322,26 @@
             st.action = { type: 'select', detail: '点选 ' + (selObjs.length > 0 ? selObjs.length + ' 个对象' : '对象') };
           } else if (sel) {
             st.mode = 'selection';
+            /* 段落级描述：选中文字按段列出（段落索引 + 内容），过滤纯空白段 */
+            var selTextParas = [];
+            try {
+              var spList = ld.GetSelectedParagraphs ? ld.GetSelectedParagraphs() : [];
+              for (var spi = 0; spi < spList.length && selTextParas.length < 25; spi++) {
+                var spt = '';
+                try { spt = String(spList[spi].GetText()); } catch (e2) {}
+                var cleaned = spt.replace(/[\t\r\n]+/g, ' ').trim();
+                if (!cleaned) continue;
+                var pidx = -1;
+                for (var tii = 0; tii < paras.length; tii++) { if (paras[tii] === spList[spi]) { pidx = tii; break; } }
+                selTextParas.push({ paraIndex: pidx, text: cleaned.slice(0, 120) });
+              }
+            } catch (e2) {}
             st.selection = {
               type: objs.length > 0 ? 'mixed' : 'text',
               selectedText: sel.slice(0, 2000),
               startPara: selFirst >= 0 ? selFirst : paraIndex,
               endPara: selLast >= 0 ? selLast : paraIndex,
+              paragraphs: selTextParas,
               objects: objs,
             };
             st.action = { type: 'select', detail: '选择' + (objs.length > 0 ? '文本+对象' : '文本') };
