@@ -173,7 +173,10 @@
         var st = {
           at: Date.now(),
           kind: 'word',
-          selection: { paraId: '', selectedText: '', paragraphText: '', page: 0 },
+          mode: 'cursor',
+          page: 0,
+          location: { paraIndex: -1, paraId: '', paragraphText: '', cursorX: null, cursorY: null, inTable: false },
+          selection: { type: 'none', selectedText: '', startPara: -1, endPara: -1, objects: [] },
           viewport: { currentPage: 0, totalPages: 0 },
           action: { type: 'none', detail: '无操作' },
         };
@@ -188,20 +191,22 @@
             if (p && typeof p.GetId === 'function') {
               var rawId = p.GetId();
               var pidStr = rawId == null ? '' : String(rawId);
-              /* 表格单元格段落无 w14:paraId，GetId() 返回 "undefined_xxx" 类内部 id → 置空，AI 用 paragraphText 定位 */
+              /* 表格单元格段落无 w14:paraId，GetId() 返回 "undefined_xxx" 类内部 id → 置空 */
               if (pidStr && pidStr.indexOf('undefined') === -1) pid = pidStr.slice(0, 32);
             }
           } catch (e) {}
-          st.selection = {
-            paraId: pid,
-            selectedText: sel.slice(0, 500),
-            paragraphText: p && typeof p.GetText === 'function' ? String(p.GetText()).slice(0, 1000) : '',
-            page: page0 + 1,
-          };
-          st.viewport = {
-            currentPage: page0 + 1,
-            totalPages: ld.GetPageCount ? Number(ld.GetPageCount()) : 1,
-          };
+          /* 段落索引：全文定位锚（正文/表格单元格/任意插入点都是段落） */
+          var paraIndex = -1;
+          try {
+            var paras = ld.GetAllParagraphs ? ld.GetAllParagraphs() : [];
+            for (var pi = 0; pi < paras.length; pi++) { if (paras[pi] === p) { paraIndex = pi; break; } }
+          } catch (e) {}
+          /* 像素坐标：精确光标位置 */
+          var cx = null, cy = null;
+          try { var cr = ld.GetCursorRealPosition ? ld.GetCursorRealPosition() : null; if (cr) { cx = Number(cr.X); cy = Number(cr.Y); } } catch (e) {}
+          var inTable = false;
+          try { inTable = !!(ld.GetCurrentTable && ld.GetCurrentTable()); } catch (e) {}
+          var paraText = p && typeof p.GetText === 'function' ? String(p.GetText()) : '';
           /* 选中范围内的对象（图片/图表/OLE/形状）——DrawingType: 0=shape 1=image 2=chart 3=smartArt 4=ole 5=video 6=audio */
           var objs = [];
           try {
@@ -215,11 +220,83 @@
               objs.push(rec);
             }
           } catch (e) {}
-          st.selectedObjects = objs;
-          try { st.inTable = !!(ld.GetCurrentTable && ld.GetCurrentTable()); } catch (e) { st.inTable = false; }
-          st.action = sel
-            ? { type: 'select', detail: '选择文字' + (objs.length > 0 ? '（含 ' + objs.length + ' 个对象）' : '') }
-            : { type: 'cursor', detail: '光标位于段落 ' + st.selection.paraId };
+          /* 选区段落：起止索引（准确 startPara/endPara）+ 表格检测（IsTableCellContent） */
+          var selFirst = -1, selLast = -1, selCellCount = 0;
+          try {
+            var selParas = ld.GetSelectedParagraphs ? ld.GetSelectedParagraphs() : [];
+            if (selParas.length > 0 && paras.length > 0) {
+              var firstIdx = -1, lastIdx = -1;
+              for (var si = 0; si < selParas.length; si++) {
+                for (var ti = 0; ti < paras.length; ti++) {
+                  if (paras[ti] === selParas[si]) { if (firstIdx < 0 || ti < firstIdx) firstIdx = ti; if (ti > lastIdx) lastIdx = ti; break; }
+                }
+                try { if (selParas[si].IsTableCellContent && selParas[si].IsTableCellContent()) selCellCount++; } catch (e2) {}
+              }
+              selFirst = firstIdx; selLast = lastIdx;
+            }
+          } catch (e) {}
+          if (selCellCount > 0) objs.push({ kind: 'table', cellCount: selCellCount });
+          /* 完整位置（鼠标在哪里） */
+          st.page = page0 + 1;
+          st.location = {
+            paraIndex: paraIndex,
+            paraId: pid,
+            paragraphText: paraText.slice(0, 1000),
+            cursorX: cx == null ? null : Math.round(cx * 100) / 100,
+            cursorY: cy == null ? null : Math.round(cy * 100) / 100,
+            inTable: inTable,
+          };
+          /* 选择类型：none / text / drawing（点选对象） */
+          var selType = 'none';
+          try { selType = editor.pluginMethod_GetSelectionType ? editor.pluginMethod_GetSelectionType() : 'none'; } catch (e) {}
+          /* 完整选择（选中了什么）：点选对象 → selection(objects)；文本 → selection(text/mixed)；点击 → cursor */
+          if (selType === 'drawing') {
+            /* 点选对象（图片/图表/形状/OLE）：getSelectedElements() + Value 详情 */
+            var selObjs = [];
+            try {
+              var els = editor.getSelectedElements ? editor.getSelectedElements() : [];
+              for (var ei = 0; ei < els.length && ei < 8; ei++) {
+                var el = els[ei];
+                var ot = el.asc_getObjectType ? el.asc_getObjectType() : -1;
+                var okind = ot === 2 ? 'image' : ot === 3 ? 'chart' : ot === 4 ? 'ole' : ot === 1 ? 'shape' : ot === 0 ? 'text' : 'object';
+                var orec = { kind: okind, objectType: ot == null ? null : Number(ot) };
+                try {
+                  var ov = el.Value;
+                  if (ov) {
+                    if (ov.ImageUrl) orec.url = String(ov.ImageUrl).slice(0, 200);
+                    if (ov.Width != null) orec.width = Math.round(Number(ov.Width));
+                    if (ov.Height != null) orec.height = Math.round(Number(ov.Height));
+                    if (ov.ChartProperties) orec.chart = true;
+                  }
+                } catch (e2) {}
+                selObjs.push(orec);
+              }
+            } catch (e) {}
+            st.mode = 'selection';
+            st.selection = {
+              type: selObjs.length > 0 ? 'objects' : 'none',
+              selectedText: '',
+              startPara: paraIndex,
+              endPara: paraIndex,
+              objects: selObjs,
+            };
+            st.action = { type: 'select', detail: '点选 ' + (selObjs.length > 0 ? selObjs.length + ' 个对象' : '对象') };
+          } else if (sel) {
+            st.mode = 'selection';
+            st.selection = {
+              type: objs.length > 0 ? 'mixed' : 'text',
+              selectedText: sel.slice(0, 2000),
+              startPara: selFirst >= 0 ? selFirst : paraIndex,
+              endPara: selLast >= 0 ? selLast : paraIndex,
+              objects: objs,
+            };
+            st.action = { type: 'select', detail: '选择' + (objs.length > 0 ? '文本+对象' : '文本') };
+          } else {
+            st.mode = 'cursor';
+            st.selection = { type: 'none', selectedText: '', startPara: -1, endPara: -1, objects: objs };
+            st.action = { type: 'cursor', detail: '光标位于段落 ' + (paraIndex >= 0 ? '#' + paraIndex : pid) };
+          }
+          st.viewport = { currentPage: page0 + 1, totalPages: ld.GetPageCount ? Number(ld.GetPageCount()) : 1 };
         } catch (e) {
           st.action = { type: 'none', detail: '读取失败: ' + e.message };
         }
