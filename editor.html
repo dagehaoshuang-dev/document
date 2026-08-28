@@ -193,8 +193,23 @@
             currentPage: page0 + 1,
             totalPages: ld.GetPageCount ? Number(ld.GetPageCount()) : 1,
           };
+          /* 选中范围内的对象（图片/图表/OLE/形状）——DrawingType: 0=shape 1=image 2=chart 3=smartArt 4=ole 5=video 6=audio */
+          var objs = [];
+          try {
+            var drawObjs = ld.GetSelectedDrawingObjectsInText ? ld.GetSelectedDrawingObjectsInText() : [];
+            for (var oi = 0; oi < drawObjs.length && oi < 8; oi++) {
+              var d = drawObjs[oi];
+              var dt = d && d.DrawingType;
+              var kind = dt === 1 ? 'image' : dt === 2 ? 'chart' : dt === 4 ? 'ole' : dt === 0 ? 'shape' : dt === 5 ? 'video' : 'object';
+              var rec = { kind: kind, drawingType: dt == null ? null : Number(dt) };
+              try { var t = d.getTitle ? d.getTitle() : null; if (t) rec.title = String(t).slice(0, 60); } catch (e) {}
+              objs.push(rec);
+            }
+          } catch (e) {}
+          st.selectedObjects = objs;
+          try { st.inTable = !!(ld.GetCurrentTable && ld.GetCurrentTable()); } catch (e) { st.inTable = false; }
           st.action = sel
-            ? { type: 'select', detail: '选择文字' }
+            ? { type: 'select', detail: '选择文字' + (objs.length > 0 ? '（含 ' + objs.length + ' 个对象）' : '') }
             : { type: 'cursor', detail: '光标位于段落 ' + st.selection.paraId };
         } catch (e) {
           st.action = { type: 'none', detail: '读取失败: ' + e.message };
