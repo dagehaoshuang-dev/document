@@ -168,8 +168,49 @@
         } catch (e) {}
         return st;
       };
-      /* 事件推送 / 主动查询统一走 normalizeInteraction */
-      var readState = normalizeInteraction;
+      /* Word（documenteditor）交互状态：selection 用 paraId + selectedText + paragraphText 定位（对齐 office-studio 契约） */
+      var normalizeWordInteraction = function (editor) {
+        var st = {
+          at: Date.now(),
+          kind: 'word',
+          selection: { paraId: '', selectedText: '', paragraphText: '', page: 0 },
+          viewport: { currentPage: 0, totalPages: 0 },
+          action: { type: 'none', detail: '无操作' },
+        };
+        try {
+          var ld = editor.WordControl.m_oLogicDocument;
+          var page0 = ld.GetCurPage ? Number(ld.GetCurPage()) : 0;
+          var sel = '';
+          try { sel = String(editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''); } catch (e) {}
+          var p = ld.GetCurrentParagraph ? ld.GetCurrentParagraph() : null;
+          st.selection = {
+            paraId: p && typeof p.GetId === 'function' ? String(p.GetId()) : '',
+            selectedText: sel.slice(0, 500),
+            paragraphText: p && typeof p.GetText === 'function' ? String(p.GetText()).slice(0, 1000) : '',
+            page: page0 + 1,
+          };
+          st.viewport = {
+            currentPage: page0 + 1,
+            totalPages: ld.GetPageCount ? Number(ld.GetPageCount()) : 1,
+          };
+          st.action = sel
+            ? { type: 'select', detail: '选择文字' }
+            : { type: 'cursor', detail: '光标位于段落 ' + st.selection.paraId };
+        } catch (e) {
+          st.action = { type: 'none', detail: '读取失败: ' + e.message };
+        }
+        return st;
+      };
+      var isWordEditor = function (editor) {
+        try {
+          var ld = editor.WordControl && editor.WordControl.m_oLogicDocument;
+          return !!(ld && !ld.Slides && typeof ld.GetCurrentParagraph === 'function');
+        } catch (e) { return false; }
+      };
+      /* 事件推送 / 主动查询统一走 readState（按文档类型分派） */
+      var readState = function (editor) {
+        return isWordEditor(editor) ? normalizeWordInteraction(editor) : normalizeInteraction(editor);
+      };
 
       /* 反向推送（节流 250ms）→ viewer */
       var lastPush = 0;
