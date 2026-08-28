@@ -223,31 +223,58 @@
             }
           } catch (e) {}
           /* 选区段落：起止索引 + 表格分组（连续表格单元格段落 = 一个独立表格对象，各带位置） */
-          var selFirst = -1, selLast = -1, tableGroups = [];
+          /* 选区段落：起止索引 */
+          var selFirst = -1, selLast = -1;
           try {
             var selParas = ld.GetSelectedParagraphs ? ld.GetSelectedParagraphs() : [];
             if (selParas.length > 0 && paras.length > 0) {
               var firstIdx = -1, lastIdx = -1;
-              var curT = null;
               for (var si = 0; si < selParas.length; si++) {
-                var sp = selParas[si];
-                var isCell = false;
-                try { isCell = !!(sp.IsTableCellContent && sp.IsTableCellContent()); } catch (e2) {}
                 var pidx = -1;
-                for (var ti = 0; ti < paras.length; ti++) { if (paras[ti] === sp) { pidx = ti; break; } }
+                for (var ti = 0; ti < paras.length; ti++) { if (paras[ti] === selParas[si]) { pidx = ti; break; } }
                 if (pidx >= 0) { if (firstIdx < 0 || pidx < firstIdx) firstIdx = pidx; if (pidx > lastIdx) lastIdx = pidx; }
-                if (isCell) {
-                  if (!curT) curT = { start: pidx, end: pidx, count: 1 };
-                  else { curT.end = pidx; curT.count++; }
-                } else if (curT) { tableGroups.push(curT); curT = null; }
               }
-              if (curT) tableGroups.push(curT);
               selFirst = firstIdx; selLast = lastIdx;
             }
           } catch (e) {}
-          for (var tg = 0; tg < tableGroups.length; tg++) {
-            objs.push({ kind: 'table', cellCount: tableGroups[tg].count, paraStart: tableGroups[tg].start, paraEnd: tableGroups[tg].end });
-          }
+          /* 选区表格：遍历 GetAllTables()（每表带 Id）→ 遍历 Content(行→单元格→段落) →
+             判断是否与选区重叠 → 每个表格独立 {id, cellCount, paraStart, paraEnd} */
+          try {
+            var allTables = ld.GetAllTables ? ld.GetAllTables() : [];
+            var selParas2 = ld.GetSelectedParagraphs ? ld.GetSelectedParagraphs() : [];
+            for (var ti = 0; ti < allTables.length; ti++) {
+              var tb = allTables[ti];
+              var tblParas = [];
+              try {
+                var tRows = tb.Content || [];
+                for (var ri = 0; ri < tRows.length; ri++) {
+                  var rCells = (tRows[ri] && tRows[ri].Content) || [];
+                  for (var ci = 0; ci < rCells.length; ci++) {
+                    /* 单元格段落：cell.Content 是 CDocumentContent，其 .Content 才是段落数组 */
+                    var cellDoc = rCells[ci] && rCells[ci].Content;
+                    var cellParas = (cellDoc && cellDoc.Content) || [];
+                    for (var cpi = 0; cpi < cellParas.length; cpi++) tblParas.push(cellParas[cpi]);
+                  }
+                }
+              } catch (e2) {}
+              /* 表格是否与选区重叠 */
+              var inSel = false;
+              for (var tpi = 0; tpi < tblParas.length && !inSel; tpi++) {
+                for (var spi = 0; spi < selParas2.length; spi++) { if (tblParas[tpi] === selParas2[spi]) { inSel = true; break; } }
+              }
+              if (!inSel) continue;
+              /* 表格段落范围（全文索引） */
+              var fp = -1, lp = -1;
+              for (var tpi2 = 0; tpi2 < tblParas.length; tpi2++) {
+                for (var ti2 = 0; ti2 < paras.length; ti2++) {
+                  if (paras[ti2] === tblParas[tpi2]) { if (fp < 0 || ti2 < fp) fp = ti2; if (ti2 > lp) lp = ti2; break; }
+                }
+              }
+              var tid = '';
+              try { tid = tb.Id != null ? String(tb.Id) : (typeof tb.GetId === 'function' ? String(tb.GetId()) : ''); } catch (e2) {}
+              objs.push({ kind: 'table', id: tid, cellCount: tblParas.length, paraStart: fp, paraEnd: lp });
+            }
+          } catch (e) {}
           /* 完整位置（鼠标在哪里） */
           st.page = page0 + 1;
           st.location = {
