@@ -183,8 +183,17 @@
           var sel = '';
           try { sel = String(editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : ''); } catch (e) {}
           var p = ld.GetCurrentParagraph ? ld.GetCurrentParagraph() : null;
+          var pid = '';
+          try {
+            if (p && typeof p.GetId === 'function') {
+              var rawId = p.GetId();
+              var pidStr = rawId == null ? '' : String(rawId);
+              /* 表格单元格段落无 w14:paraId，GetId() 返回 "undefined_xxx" 类内部 id → 置空，AI 用 paragraphText 定位 */
+              if (pidStr && pidStr.indexOf('undefined') === -1) pid = pidStr.slice(0, 32);
+            }
+          } catch (e) {}
           st.selection = {
-            paraId: p && typeof p.GetId === 'function' ? String(p.GetId()) : '',
+            paraId: pid,
             selectedText: sel.slice(0, 500),
             paragraphText: p && typeof p.GetText === 'function' ? String(p.GetText()).slice(0, 1000) : '',
             page: page0 + 1,
