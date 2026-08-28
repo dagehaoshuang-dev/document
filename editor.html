@@ -650,8 +650,77 @@
               } catch (e) { fail(e); }
               break;
             }
-            default:
-              fail(new Error('unknown aiEdit op: ' + op));
+            /* setHeaderVisible：简易模式开关——隐藏/恢复顶部 header + Ribbon（保留左/右/底栏）。
+               引擎把 middle 的 top/height 写死（随 header 高度），隐藏后靠触发 resize 让引擎重排：
+               middle 自动顶到 0、铺满剩余、不盖底部 statusbar（实测 middle=1297 = vbox-statusbar）。
+               不要手动改 mid.style——尺寸是引擎算的，手改会盖 statusbar 或残留。 */
+            case 'setHeaderVisible': {
+              var visible = m.visible !== false;
+              try {
+                var frm = document.querySelector('iframe[name="frameEditor"]');
+                var w = frm && frm.contentWindow;
+                var d = w && w.document;
+                if (!d) { fail(new Error('frameEditor not ready')); break; }
+                var appTitle = d.getElementById('app-title');
+                var tb = d.getElementById('toolbar');
+                var mid = d.querySelector('.layout-item.middle');
+                if (!mid) { fail(new Error('editor layout not found')); break; }
+                if (appTitle) appTitle.style.display = visible ? '' : 'none';
+                if (tb) tb.style.display = visible ? '' : 'none';
+                try { w.dispatchEvent(new w.Event('resize')); } catch (e) {}
+                var r = mid.getBoundingClientRect();
+                done({ ok: true, visible: visible, middleTop: Math.round(r.top), middleHeight: Math.round(r.height) });
+              } catch (e) { fail(e); }
+              break;
+            }
+            /* ===== Word 专项 op（documenteditor：pluginMethod/asc 层，触发重绘+保存） ===== */
+            case 'wordSetTrackRevisions': {
+              var revOn = m.enabled !== false;
+              try {
+                if (typeof editor.asc_SetTrackRevisions !== 'function') { fail(new Error('修订模式仅 Word 编辑器支持')); break; }
+                editor.asc_SetTrackRevisions(revOn);
+                var revNow = editor.asc_IsTrackRevisions ? editor.asc_IsTrackRevisions() : revOn;
+                done({ ok: true, enabled: !!revNow });
+              } catch (e) { fail(e); }
+              break;
+            }
+            case 'wordAcceptRevision': {
+              try {
+                // 全量接受：pluginMethod_AcceptReviewChanges 只处理当前修订，AI 意图通常是全量
+                if (typeof editor.asc_AcceptAllChanges !== 'function') { fail(new Error('asc_AcceptAllChanges 不可用')); break; }
+                editor.asc_AcceptAllChanges();
+                done({ ok: true, all: true });
+              } catch (e) { fail(e); }
+              break;
+            }
+            case 'wordRejectRevision': {
+              try {
+                if (typeof editor.asc_RejectAllChanges !== 'function') { fail(new Error('asc_RejectAllChanges 不可用')); break; }
+                editor.asc_RejectAllChanges();
+                done({ ok: true, all: true });
+              } catch (e) { fail(e); }
+              break;
+            }
+            case 'wordSearchReplace': {
+              var wFind = String(m.find || '');
+              if (!wFind) { fail(new Error('wordSearchReplace requires find')); break; }
+              try {
+                if (typeof editor.pluginMethod_SearchAndReplace !== 'function') { fail(new Error('pluginMethod_SearchAndReplace 不可用')); break; }
+                var srr = editor.pluginMethod_SearchAndReplace({ searchString: wFind, replaceString: String(m.replace || ''), matchCase: !!m.matchCase });
+                done({ ok: true, find: wFind, replace: String(m.replace || ''), matchCase: !!m.matchCase, ret: srr == null ? null : String(srr) });
+              } catch (e) { fail(e); }
+              break;
+            }
+            case 'wordReadFullText': {
+              try {
+                if (typeof editor.asc_EditSelectAll !== 'function' || typeof editor.pluginMethod_GetSelectedText !== 'function') { fail(new Error('读全文 API 不可用')); break; }
+                editor.asc_EditSelectAll();
+                var wFull = String(editor.pluginMethod_GetSelectedText() || '').replace(/\r\n/g, '\n');
+                if (typeof editor.asc_RemoveSelection === 'function') editor.asc_RemoveSelection();
+                done({ ok: true, text: wFull, chars: wFull.length });
+              } catch (e) { fail(e); }
+              break;
+            }
           }
         } catch (err) { fail(err); }
       });
