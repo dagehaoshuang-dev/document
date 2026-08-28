@@ -217,25 +217,37 @@
               var kind = dt === 1 ? 'image' : dt === 2 ? 'chart' : dt === 4 ? 'ole' : dt === 0 ? 'shape' : dt === 5 ? 'video' : 'object';
               var rec = { kind: kind, drawingType: dt == null ? null : Number(dt) };
               try { var t = d.getTitle ? d.getTitle() : null; if (t) rec.title = String(t).slice(0, 60); } catch (e) {}
+              /* 对象位置：Internal_Position 含 PageNum/X/Y/W/H（浮动对象坐标级） */
+              try { var ip = d.Internal_Position; if (ip) { if (ip.PageNum != null) rec.page = Number(ip.PageNum) + 1; if (ip.X != null) rec.x = Math.round(Number(ip.X)); if (ip.Y != null) rec.y = Math.round(Number(ip.Y)); if (ip.W != null) rec.width = Math.round(Number(ip.W)); if (ip.H != null) rec.height = Math.round(Number(ip.H)); } } catch (e2) {}
               objs.push(rec);
             }
           } catch (e) {}
-          /* 选区段落：起止索引（准确 startPara/endPara）+ 表格检测（IsTableCellContent） */
-          var selFirst = -1, selLast = -1, selCellCount = 0;
+          /* 选区段落：起止索引 + 表格分组（连续表格单元格段落 = 一个独立表格对象，各带位置） */
+          var selFirst = -1, selLast = -1, tableGroups = [];
           try {
             var selParas = ld.GetSelectedParagraphs ? ld.GetSelectedParagraphs() : [];
             if (selParas.length > 0 && paras.length > 0) {
               var firstIdx = -1, lastIdx = -1;
+              var curT = null;
               for (var si = 0; si < selParas.length; si++) {
-                for (var ti = 0; ti < paras.length; ti++) {
-                  if (paras[ti] === selParas[si]) { if (firstIdx < 0 || ti < firstIdx) firstIdx = ti; if (ti > lastIdx) lastIdx = ti; break; }
-                }
-                try { if (selParas[si].IsTableCellContent && selParas[si].IsTableCellContent()) selCellCount++; } catch (e2) {}
+                var sp = selParas[si];
+                var isCell = false;
+                try { isCell = !!(sp.IsTableCellContent && sp.IsTableCellContent()); } catch (e2) {}
+                var pidx = -1;
+                for (var ti = 0; ti < paras.length; ti++) { if (paras[ti] === sp) { pidx = ti; break; } }
+                if (pidx >= 0) { if (firstIdx < 0 || pidx < firstIdx) firstIdx = pidx; if (pidx > lastIdx) lastIdx = pidx; }
+                if (isCell) {
+                  if (!curT) curT = { start: pidx, end: pidx, count: 1 };
+                  else { curT.end = pidx; curT.count++; }
+                } else if (curT) { tableGroups.push(curT); curT = null; }
               }
+              if (curT) tableGroups.push(curT);
               selFirst = firstIdx; selLast = lastIdx;
             }
           } catch (e) {}
-          if (selCellCount > 0) objs.push({ kind: 'table', cellCount: selCellCount });
+          for (var tg = 0; tg < tableGroups.length; tg++) {
+            objs.push({ kind: 'table', cellCount: tableGroups[tg].count, paraStart: tableGroups[tg].start, paraEnd: tableGroups[tg].end });
+          }
           /* 完整位置（鼠标在哪里） */
           st.page = page0 + 1;
           st.location = {
