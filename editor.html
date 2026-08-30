@@ -897,6 +897,30 @@
               } catch (e) { fail(e); }
               break;
             }
+            case 'wordFindText': {
+              var fText = String(m.text || '');
+              if (!fText) { fail(new Error('wordFindText requires text')); break; }
+              try {
+                if (typeof editor.asc_findText !== 'function') { fail(new Error('asc_findText 不可用')); break; }
+                /* asc_findText 期望搜索设置对象（SetText/GetText/IsMatchCase/IsWholeWords）；
+                 * 剥离环境（renderer=null）走 LogicDocument.Search 分支，返回值 = 命中数。 */
+                var fq = {
+                  _t: fText, _mc: !!m.matchCase, _ww: !!m.wholeWords,
+                  SetText: function (t) { this._t = t; },
+                  GetText: function () { return this._t; },
+                  IsMatchCase: function () { return this._mc; },
+                  SetMatchCase: function (v) { this._mc = v; },
+                  IsWholeWords: function () { return this._ww; },
+                  SetWholeWords: function (v) { this._ww = v; },
+                };
+                var fCount = editor.asc_findText(fq, null, null)
+                if (typeof fCount !== 'number') fCount = 0
+                /* 清理搜索态（避免残留 IsSearch 影响后续编辑） */
+                try { if (typeof editor.asc_endFindText === 'function') editor.asc_endFindText(); } catch (e7) {}
+                done({ ok: true, found: fCount > 0, count: fCount, text: fText, matchCase: !!m.matchCase });
+              } catch (e) { fail(e); }
+              break;
+            }
             case 'wordSearchReplace': {
               var wFind = String(m.find || '');
               if (!wFind) { fail(new Error('wordSearchReplace requires find')); break; }
@@ -914,6 +938,74 @@
                 var wFull = String(editor.pluginMethod_GetSelectedText() || '').replace(/\r\n/g, '\n');
                 if (typeof editor.asc_RemoveSelection === 'function') editor.asc_RemoveSelection();
                 done({ ok: true, text: wFull, chars: wFull.length });
+              } catch (e) { fail(e); }
+              break;
+            }
+            /* 统一插入（返回插入对象标识）：图片=ImageUrl / 表格=位置 / 文字=段落位置 */
+            case 'wordInsertImage': {
+              var iurl = String(m.url || '');
+              if (!iurl) { fail(new Error('wordInsertImage requires url')); break; }
+              var iw = Number(m.width) || 0, ih = Number(m.height) || 0;
+              try {
+                if (typeof editor.pluginMethod_PasteHtml !== 'function') { fail(new Error('PasteHtml 不可用')); break; }
+                var ihtml = '<img src="' + iurl + '"' + (iw > 0 ? ' width="' + iw + '"' : '') + (ih > 0 ? ' height="' + ih + '"' : '') + ' />';
+                editor.pluginMethod_PasteHtml(ihtml);
+                /* 插入后自动选中，但 ImageUrl 需等引擎完成选中/设置 → 延迟 400ms 读（异步 done，同 replaceText op） */
+                setTimeout(function () {
+                  var imageId = '';
+                  var paraIdxI = -1;
+                  try {
+                    var elsI = editor.getSelectedElements ? editor.getSelectedElements() : [];
+                    for (var eiI = 0; eiI < elsI.length; eiI++) {
+                      var vI = elsI[eiI].Value;
+                      if (vI && vI.ImageUrl) { imageId = String(vI.ImageUrl); break; }
+                    }
+                    var ldI = editor.WordControl.m_oLogicDocument;
+                    var cpI = ldI.GetCurrentParagraph ? ldI.GetCurrentParagraph() : null;
+                    var parasI = ldI.GetAllParagraphs ? ldI.GetAllParagraphs() : [];
+                    for (var piI = 0; piI < parasI.length; piI++) { if (parasI[piI] === cpI) { paraIdxI = piI; break; } }
+                  } catch (e2) {}
+                  done({ ok: true, type: 'image', imageId: imageId, paraIndex: paraIdxI, width: iw, height: ih, url: iurl });
+                }, 400);
+              } catch (e) { fail(e); }
+              break;
+            }
+            case 'wordInsertText': {
+              var ttext = String(m.text || '');
+              try {
+                if (typeof editor.pluginMethod_PasteHtml === 'function') {
+                  var escT = String(ttext).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r\n|\r|\n/g, '<br/>');
+                  editor.pluginMethod_PasteHtml(escT);
+                } else if (typeof editor.pluginMethod_InputText === 'function') {
+                  editor.pluginMethod_InputText(ttext);
+                } else { fail(new Error('文本插入 API 不可用')); break; }
+                /* 返回插入位置（段落） */
+                var pIdxT = -1, pTextT = '';
+                try {
+                  var ldT = editor.WordControl.m_oLogicDocument;
+                  var cpT = ldT.GetCurrentParagraph ? ldT.GetCurrentParagraph() : null;
+                  var parasT = ldT.GetAllParagraphs ? ldT.GetAllParagraphs() : [];
+                  for (var piT = 0; piT < parasT.length; piT++) { if (parasT[piT] === cpT) { pIdxT = piT; break; } }
+                  pTextT = cpT && typeof cpT.GetText === 'function' ? String(cpT.GetText()) : '';
+                } catch (e2) {}
+                done({ ok: true, type: 'text', paraIndex: pIdxT, paragraphText: pTextT.slice(0, 200) });
+              } catch (e) { fail(e); }
+              break;
+            }
+            case 'wordInsertTable': {
+              var thtml = String(m.html || '');
+              if (!thtml) { fail(new Error('wordInsertTable requires html')); break; }
+              try {
+                if (typeof editor.pluginMethod_PasteHtml !== 'function') { fail(new Error('PasteHtml 不可用')); break; }
+                editor.pluginMethod_PasteHtml(thtml);
+                var pIdxTb = -1;
+                try {
+                  var ldTb = editor.WordControl.m_oLogicDocument;
+                  var cpTb = ldTb.GetCurrentParagraph ? ldTb.GetCurrentParagraph() : null;
+                  var parasTb = ldTb.GetAllParagraphs ? ldTb.GetAllParagraphs() : [];
+                  for (var piTb = 0; piTb < parasTb.length; piTb++) { if (parasTb[piTb] === cpTb) { pIdxTb = piTb; break; } }
+                } catch (e2) {}
+                done({ ok: true, type: 'table', paraIndex: pIdxTb, html: thtml.slice(0, 200) });
               } catch (e) { fail(e); }
               break;
             }
