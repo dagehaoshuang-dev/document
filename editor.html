@@ -751,7 +751,11 @@
               if (typeof fn !== 'function') { fail(new Error('no such method on editor: ' + m.method)); break; }
               var args = materialize(Array.isArray(m.args) ? m.args : []);
               var ret = fn.apply(editor, args);
-              done({ method: m.method, ret: ret == null ? null : String(ret) });
+              var serialized;
+              if (ret == null) serialized = null;
+              else if (typeof ret === 'object') { try { serialized = JSON.stringify(ret); } catch (e) { serialized = '[unserializable]'; } if (serialized && serialized.length > 4000) serialized = serialized.slice(0, 4000); }
+              else serialized = String(ret);
+              done({ method: m.method, ret: serialized });
               break;
             }
             case 'inspect': {
