@@ -255,11 +255,5 @@ export function initEmbedApi(): void {
 
   window.addEventListener('load', () => {
     postToParent('document:ready');
-    // document:ready 只在 window load 发一次（历史行为）；但宿主 viewer 在画布 Iframe 重建后
-    // 可能初始化慢、错过这帧 → 编辑器白屏（viewer 永远等 document:ready 才 open 文档）。
-    // 根治：load 后按时间档位重发几帧（viewer 侧幂等，重复帧无害）——确保 viewer 慢也能收到。
-    [1000, 3000, 6000, 12000].forEach((ms) => {
-      setTimeout(() => postToParent('document:ready'), ms);
-    });
   });
 }
