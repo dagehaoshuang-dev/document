@@ -691,16 +691,20 @@
                 text: editor.pluginMethod_GetSelectedText ? editor.pluginMethod_GetSelectedText() : '',
               });
               break;
-            case 'goSlide':
-              if (typeof editor.pluginMethod_GoToSlide === 'function') editor.pluginMethod_GoToSlide(Number(m.slide) || 0);
-              done({ slide: Number(m.slide) || 0 });
+            case 'goSlide': {
+              var slideIn = Number(m.slide);
+              var slideTarget = (isNaN(slideIn) || slideIn < 1) ? 1 : slideIn; // 1-based 页号，最小第 1 页
+              var slideOk = false;
+              if (typeof editor.goToPage === 'function') { editor.goToPage(slideTarget - 1); slideOk = true; }
+              else if (typeof editor.pluginMethod_GoToSlide === 'function') { editor.pluginMethod_GoToSlide(slideTarget); slideOk = true; }
+              done({ slide: slideTarget, applied: slideOk, received: m.slide });
               break;
+            }
             case 'goToPage': {
-              var target = Number(m.page);
-              var ok2 = false;
-              if (typeof editor.GoToPage === 'function') { editor.GoToPage(target); ok2 = true; }
-              else if (typeof editor.asc_GoToPage === 'function') { editor.asc_GoToPage(target); ok2 = true; }
-              done({ page: target, applied: ok2 });
+              var pageIn = Number(m.page);
+              var pageOk = false;
+              if (!isNaN(pageIn) && typeof editor.goToPage === 'function') { editor.goToPage(pageIn); pageOk = true; }
+              done({ page: pageIn, applied: pageOk, received: m.page });
               break;
             }
             case 'selectAll':
