@@ -1,3 +1,4 @@
+import { initOpenJarvisBridge, isCanvasEmbedded } from './lib/openjarvis-bridge';
 import {
   documentIsExpected,
   healStaleController,
@@ -160,15 +161,29 @@ const savedParam = params['saved'] ?? '';
 // embedded) shows the crawlable hero. If a document is about to load or be
 // created, or we're embedded, hide it immediately to avoid a flash before the
 // editor takes over.
+// OpenJarvis 画布嵌入模式：既有的 document 打开链（?file/?src/?new/?open/?saved）都不适用——文档
+// 从 skill-data（JarvisSDK）读，经 openjarvis-bridge 打开 + 挂 window.office。判断提前到
+// hideLanding/replace 之前：画布嵌入（含独立 &canvas=1 打开）既不走 document 默认链，也不会
+// 走到下面的 window.location.replace('/') 把 iframe 重定向走。
+const canvasEmbed = isCanvasEmbedded();
 const isEmbedded = document.body.classList.contains('embed-mode');
-if (documentUrl || isEmbedded || createNewOnLoad || openLocalOnLoad || savedParam) {
+if (canvasEmbed || documentUrl || isEmbedded || createNewOnLoad || openLocalOnLoad || savedParam) {
   hideLanding();
 } else {
   // Bare /editor with nothing to open: the landing lives at / now.
   window.location.replace('/');
 }
 
+if (canvasEmbed) {
+  void initOpenJarvisBridge().catch((error) => {
+    console.error('[openjarvis-bridge] init failed:', error);
+  });
+}
+
 void (async () => {
+  // 画布嵌入模式下不走 document 自己的打开链（见上）。
+  if (canvasEmbed) return;
+
   if (savedParam || documentUrl) {
     const [{ getDoc }, { restoreDocument }, { stableDocIdFor }] = await Promise.all([
       import('./lib/history/store'),
